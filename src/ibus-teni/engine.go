@@ -24,16 +24,11 @@ import (
 	"fmt"
 	"github.com/godbus/dbus"
 	"github.com/sarim/goibus/ibus"
-	"log"
 	"os/exec"
 	"runtime/debug"
 	"sync"
 	"teni"
 	"time"
-)
-
-const (
-	DiffNumpadKeypad = IBUS_KP_0 - IBUS_0
 )
 
 type IBusTeniEngine struct {
@@ -49,6 +44,7 @@ type IBusTeniEngine struct {
 	exceptMap      *ExceptMap
 	display        CDisplay
 	prevText       []rune
+	ignoreNextUp   bool
 }
 
 var (
@@ -88,9 +84,9 @@ func IBusTeniEngineCreator(conn *dbus.Conn, engineName string) dbus.ObjectPath {
 
 	var config = LoadConfig(engineName)
 	if config.ToneType == ConfigToneStd {
-		teni.InitWordTrie(DictStdList...)
+		teni.InitWordTrie(config.EnableForceSpell == ibus.PROP_STATE_CHECKED, DictStdList...)
 	} else {
-		teni.InitWordTrie(DictNewList...)
+		teni.InitWordTrie(config.EnableForceSpell == ibus.PROP_STATE_CHECKED, DictNewList...)
 	}
 
 	engine := &IBusTeniEngine{
@@ -126,16 +122,15 @@ func (e *IBusTeniEngine) updatePreedit() {
 	preeditLen := uint32(len(e.prevText))
 	preeditText += e.preediter.GetResultStr()
 	preeditLen += e.preediter.ResultLen()
-	if preeditLen > 0 {
-		e.UpdatePreeditTextWithMode(ibus.NewText(preeditText), preeditLen, true, ibus.IBUS_ENGINE_PREEDIT_COMMIT)
-	} else {
-		e.HidePreeditText()
+
+	e.UpdatePreeditTextWithMode(ibus.NewText(preeditText), preeditLen, true, ibus.IBUS_ENGINE_PREEDIT_COMMIT)
+
+	if preeditLen == 0 {
 		e.preediter.Reset()
 	}
 }
 
-func (e *IBusTeniEngine) commitPreedit(lastKey uint32) bool {
-	var keyAppended = false
+func (e *IBusTeniEngine) commitPreedit(lastKey uint32) {
 	var commitStr = string(e.prevText)
 	if lastKey == IBUS_Escape {
 		commitStr += e.preediter.GetRawStr()
@@ -147,22 +142,8 @@ func (e *IBusTeniEngine) commitPreedit(lastKey uint32) bool {
 	e.preediter.Reset()
 	e.prevText = e.prevText[:0]
 
-	//Convert num-pad key to normal number
-	if (lastKey >= IBUS_KP_0 && lastKey <= IBUS_KP_9) ||
-		(lastKey >= IBUS_KP_Multiply && lastKey <= IBUS_KP_Divide) {
-		lastKey = lastKey - DiffNumpadKeypad
-	}
-
-	if lastKey >= 0x20 && lastKey <= 0xFF {
-		//append printable keys
-		commitStr += string(lastKey)
-		keyAppended = true
-	}
-
 	e.HidePreeditText()
 	e.CommitText(ibus.NewText(commitStr))
-
-	return keyAppended
 }
 
 func (e *IBusTeniEngine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state uint32) (bool, *dbus.Error) {
@@ -170,9 +151,19 @@ func (e *IBusTeniEngine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state ui
 	defer e.Unlock()
 
 	if e.zeroLocation || e.excepted ||
-		state&IBUS_RELEASE_MASK != 0 || //Ignore key-up event
 		(state&IBUS_SHIFT_MASK == 0 && (keyVal == IBUS_Shift_L || keyVal == IBUS_Shift_R)) { //Ignore 1 shift key
 		return false, nil
+	}
+
+	if state&IBUS_RELEASE_MASK != 0 {
+		//Ignore key-up event
+		if e.ignoreNextUp || e.preediter.RawKeyLen() > 0 {
+			return true, nil
+		} else {
+			return false, nil
+		}
+	} else {
+		e.ignoreNextUp = false
 	}
 
 	if state&IBUS_CONTROL_MASK != 0 ||
@@ -186,6 +177,7 @@ func (e *IBusTeniEngine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state ui
 			return false, nil
 		} else {
 			//while typing, do not process control keys
+			e.ignoreNextUp = true
 			return true, nil
 		}
 	}
@@ -194,50 +186,55 @@ func (e *IBusTeniEngine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state ui
 		if e.preediter.RawKeyLen() > 0 {
 			e.preediter.Backspace()
 			e.updatePreedit()
+			e.ignoreNextUp = true
 			return true, nil
 		} else if lenLongText := len(e.prevText); lenLongText > 0 {
 			backLen := e.preediter.PopStateBack()
 			e.prevText = e.prevText[:lenLongText-1-backLen]
 			e.updatePreedit()
+			e.ignoreNextUp = true
 			return true, nil
 		}
 	}
 
 	if keyVal == IBUS_Return || keyVal == IBUS_KP_Enter {
 		if e.preediter.ResultLen() > 0 || len(e.prevText) > 0 {
-			e.commitPreedit(keyVal)
-			if e.capSurrounding {
-				return false, nil
+			e.commitPreedit(0)
+			//forward lastKey
+			if !e.capSurrounding {
+				e.ForwardKeyEvent(keyVal, keyCode, state)
+				return true, nil
 			}
-			e.ForwardKeyEvent(keyVal, keyCode, state)
-			return true, nil
-		} else {
-			return false, nil
 		}
+		return false, nil
 	}
 
 	if keyVal == IBUS_Escape {
 		if e.preediter.RawKeyLen() > 0 {
 			e.commitPreedit(keyVal)
+			e.ignoreNextUp = true
 			return true, nil
 		}
 	}
-	log.Printf("keyCode 0x%04x keyval 0x%04x", keyCode, keyVal)
+
 	if e.preediter.RawKeyLen() > 2*teni.MaxWordLength {
 		e.commitPreedit(keyVal)
+		e.ignoreNextUp = true
 		return true, nil
 	}
 
 	if (keyVal >= 'a' && keyVal <= 'z') ||
 		(keyVal >= 'A' && keyVal <= 'Z') ||
 		(keyVal >= '0' && keyVal <= '9' && e.preediter.ResultLen() > 0) ||
-		(e.preediter.InputMethod == teni.IMTelex && teni.InChangeCharMap(rune(keyVal))) {
+		(e.preediter.InputMethod == teni.IMTelex && teni.InChangeCharMap(rune(keyVal))) ||
+		(e.preediter.InputMethod == teni.IMTelexEx && teni.InChangeCharMapEx(rune(keyVal))) {
 		if e.preediter.InputMethod == teni.IMTelex && state&IBUS_LOCK_MASK != 0 {
 			keyVal = teni.SwitchCaplock(keyVal)
 		}
 		keyRune := rune(keyVal)
 		e.preediter.AddKey(keyRune)
 		e.updatePreedit()
+		e.ignoreNextUp = true
 		return true, nil
 	} else {
 		if e.preediter.ResultLen() > 0 || len(e.prevText) > 0 {
@@ -255,25 +252,24 @@ func (e *IBusTeniEngine) ProcessKeyEvent(keyVal uint32, keyCode uint32, state ui
 				e.prevText = append(e.prevText, rune(keyVal))
 				preeditText, preeditLen := string(e.prevText), uint32(len(e.prevText))
 				e.UpdatePreeditTextWithMode(ibus.NewText(preeditText), preeditLen, true, ibus.IBUS_ENGINE_PREEDIT_COMMIT)
+				e.ignoreNextUp = true
 				return true, nil
 			}
 
-			if e.commitPreedit(keyVal) {
-				//lastKey already appended to commit string
-				return true, nil
-			} else {
-				//forward lastKey
-				if e.capSurrounding {
-					return false, nil
-				}
-				e.ForwardKeyEvent(keyVal, keyCode, state)
-				return true, nil
+			e.commitPreedit(keyVal)
+
+			//forward lastKey
+			if e.capSurrounding {
+				return false, nil
 			}
+			e.ForwardKeyEvent(keyVal, keyCode, state)
+			return true, nil
 		} else if e.config.EnableLongText == ibus.PROP_STATE_CHECKED && printableKeyCode[keyCode] && e.preediter.LenStateBack() > 0 {
 			e.preediter.PushStateBack()
 			e.prevText = append(e.prevText, rune(keyVal))
 			preeditText, preeditLen := string(e.prevText), uint32(len(e.prevText))
 			e.UpdatePreeditTextWithMode(ibus.NewText(preeditText), preeditLen, true, ibus.IBUS_ENGINE_PREEDIT_COMMIT)
+			e.ignoreNextUp = true
 			return true, nil
 		}
 		//pre-edit empty, just forward key
@@ -294,6 +290,9 @@ func (e *IBusTeniEngine) FocusIn() *dbus.Error {
 
 	e.RegisterProperties(e.propList)
 
+	e.preediter.Reset()
+	e.prevText = e.prevText[:0]
+
 	return nil
 }
 
@@ -308,25 +307,22 @@ func (e *IBusTeniEngine) FocusOut() *dbus.Error {
 }
 
 func (e *IBusTeniEngine) Reset() *dbus.Error {
-	e.Lock()
-	defer e.Unlock()
+	return nil
+}
 
-	if e.preediter.RawKeyLen() > 0 {
-		e.HidePreeditText()
-	}
+func (e *IBusTeniEngine) Enable() *dbus.Error {
 	e.preediter.Reset()
 	e.prevText = e.prevText[:0]
 
 	return nil
 }
 
-func (e *IBusTeniEngine) Enable() *dbus.Error {
-	return nil
-}
-
 func (e *IBusTeniEngine) Disable() *dbus.Error {
 	e.Lock()
 	defer e.Unlock()
+
+	e.preediter.Reset()
+	e.prevText = e.prevText[:0]
 
 	if e.display != nil {
 		x11CloseDisplay(e.display)
@@ -368,6 +364,7 @@ func (e *IBusTeniEngine) PropertyActivate(propName string, propState uint32) *db
 		(propName == PropKeyMethodTeni ||
 			propName == PropKeyMethodVni ||
 			propName == PropKeyMethodTelex ||
+			propName == PropKeyMethodTelexEx ||
 			propName == PropKeyToneStd ||
 			propName == PropKeyToneNew) {
 		switch propName {
@@ -380,6 +377,9 @@ func (e *IBusTeniEngine) PropertyActivate(propName string, propState uint32) *db
 		case PropKeyMethodTelex:
 			e.config.InputMethod = teni.IMTelex
 			e.preediter.InputMethod = teni.IMTelex
+		case PropKeyMethodTelexEx:
+			e.config.InputMethod = teni.IMTelexEx
+			e.preediter.InputMethod = teni.IMTelexEx
 		case PropKeyToneStd:
 			e.config.ToneType = ConfigToneStd
 		case PropKeyToneNew:
@@ -390,9 +390,9 @@ func (e *IBusTeniEngine) PropertyActivate(propName string, propState uint32) *db
 		e.RegisterProperties(e.propList)
 		if e.config.ToneType != oldToneType {
 			if e.config.ToneType == ConfigToneStd {
-				teni.InitWordTrie(DictStdList...)
+				teni.InitWordTrie(e.preediter.ForceSpell, DictStdList...)
 			} else {
-				teni.InitWordTrie(DictNewList...)
+				teni.InitWordTrie(e.preediter.ForceSpell, DictNewList...)
 			}
 		}
 		return nil
@@ -432,6 +432,13 @@ func (e *IBusTeniEngine) PropertyActivate(propName string, propState uint32) *db
 		e.propList = GetPropListByConfig(e.config)
 		e.RegisterProperties(e.propList)
 		e.preediter.ForceSpell = e.config.EnableForceSpell == ibus.PROP_STATE_CHECKED
+
+		if e.config.ToneType == ConfigToneStd {
+			teni.InitWordTrie(e.preediter.ForceSpell, DictStdList...)
+		} else {
+			teni.InitWordTrie(e.preediter.ForceSpell, DictNewList...)
+		}
+
 		return nil
 	}
 

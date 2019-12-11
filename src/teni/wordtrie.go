@@ -26,14 +26,105 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"unicode"
 )
 
 const (
 	FindResultNotMatch = iota
 	FindResultMatchPrefix
+	FindResultRevert
 	FindResultMatchFull
+
+	Consonant = "qwrtpsdfghjklzxcvbnmđQWRTPSDFGHJKLZXCVBNMĐ"
 )
+
+var consonantKeys = map[rune]bool{
+	'đ': true,
+	'q': true,
+	'w': true,
+	'r': true,
+	't': true,
+	'p': true,
+	's': true,
+	'd': true,
+	'f': true,
+	'g': true,
+	'h': true,
+	'j': true,
+	'k': true,
+	'l': true,
+	'z': true,
+	'x': true,
+	'c': true,
+	'v': true,
+	'b': true,
+	'n': true,
+	'm': true,
+	'Đ': true,
+	'Q': true,
+	'W': true,
+	'R': true,
+	'T': true,
+	'P': true,
+	'S': true,
+	'D': true,
+	'F': true,
+	'G': true,
+	'H': true,
+	'J': true,
+	'K': true,
+	'L': true,
+	'Z': true,
+	'X': true,
+	'C': true,
+	'V': true,
+	'B': true,
+	'N': true,
+	'M': true,
+}
+
+var changeableConsonant = []string{"d", "D"}
+
+var connectConsonant = []string{"qu", "QU", "Qu", "qU", "gi", "GI", "Gi", "gI"}
+
+func RemoveConsonant(s string) string {
+	if len([]rune(s)) <= 1 {
+		return s
+	}
+
+	for _, cs := range connectConsonant {
+		if len(s) > len(cs) && strings.HasPrefix(s, cs) {
+			return s[len(cs):]
+		}
+	}
+	return strings.TrimLeft(s, Consonant)
+}
+
+func SplitConsonantVowel(rs []rune) ([]rune, []rune) {
+	s := string(rs)
+	for _, cc := range changeableConsonant {
+		if s == cc {
+			return nil, rs
+		}
+	}
+	for _, cs := range connectConsonant {
+		rcs := []rune(cs)
+		if len(rs) > len(rcs) && strings.HasPrefix(s, cs) {
+			return rcs, rs[len(rcs):]
+		}
+	}
+
+	for i, c := range rs {
+		if consonantKeys[unicode.ToLower(c)] {
+			continue
+		} else {
+			return rs[0:i], rs[i:]
+		}
+	}
+
+	return rs, nil
+}
 
 //Word trie
 type W struct {
@@ -109,7 +200,7 @@ func fileExist(p string) bool {
 	return err == nil && !sta.IsDir()
 }
 
-func InitWordTrie(dataFiles ...string) error {
+func InitWordTrie(forceSpell bool, dataFiles ...string) error {
 	rootWordTrie = &W{F: false}
 
 	for _, dataFile := range dataFiles {
@@ -126,7 +217,15 @@ func InitWordTrie(dataFiles ...string) error {
 			if len(line) == 0 {
 				break
 			}
-			addTrie(rootWordTrie, []rune(string(line)), false)
+			if len(line) <= MaxWordLength {
+				sLine := string(line)
+				if !forceSpell {
+					sLine = RemoveConsonant(sLine)
+				}
+				if len(sLine) > 0 {
+					addTrie(rootWordTrie, []rune(sLine), false)
+				}
+			}
 		}
 		f.Close()
 	}

@@ -22,7 +22,7 @@
 
 %define engine_name  teni
 %define package_name ibus-%{engine_name}
-%define version      1.4.0
+%define version      1.5.2
 
 
 #install directories ----------------------------------------------------------
@@ -81,6 +81,20 @@ rm -rf %{buildroot}
 
 
 %changelog
+* Sat Nov 24 2018 Nguyen Cong Hoang <hoangnc.jp@gmail.com> - 1.5.2
+- Sửa kiểu gõ tự do không kiểm tra chính tả
+* Fri Nov 23 2018 Nguyen Cong Hoang <hoangnc.jp@gmail.com> - 1.5.1
+- Sửa kiểu gõ tự do không kiểm tra chính tả
+* Sun Nov 4 2018 Nguyen Cong Hoang <hoangnc.jp@gmail.com> - 1.5.0
+- Thêm kiểu gõ [Telex] (kiểu gõ này cho phép dùng phím [])
+- Sửa lỗi không xóa hết chữ trên Telegram
+- Sửa lỗi con trỏ chuột nhảy về đầu dòng trên Facebook chat
+* Mon Oct 22 2018 Nguyen Cong Hoang <hoangnc.jp@gmail.com> - 1.4.2
+- Sửa lỗi mất chữ khi đang gõ
+- Sửa lỗi con trỏ chuột nhảy về đầu dòng trên Facebook chat
+* Sun Oct 21 2018 Nguyen Cong Hoang <hoangnc.jp@gmail.com> - 1.4.1
+- Cập nhật từ điển
+- Sửa lỗi mất chữ khi đang gõ
 * Sun Oct 7 2018 Nguyen Cong Hoang <hoangnc.jp@gmail.com> - 1.4.0
 - Thêm lựa chọn "Giữ nhiều chữ", cho phép sửa dấu những chữ đã gõ xong
 - Thêm lựa chọn "Đúng chính tả", cho phép bỏ qua kiểm tra chính tả
